@@ -1,0 +1,26 @@
+services:
+  lavalink:
+    image: ghcr.io/lavalink-devs/lavalink:4
+    container_name: lavalink
+    restart: unless-stopped
+    environment:
+      - _JAVA_OPTIONS=-Xms512m -Xmx1024m
+      - LAVALINK_PASSWORD=pR8cH3n_x0vZx2Z7cV5NqY1L6tK9wM3b
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+
+  bot:
+    build: ./bot
+    container_name: music-bot
+    restart: unless-stopped
+    env_file: .env
+    working_dir: /usr/src/app
+    volumes:
+      - ./bot:/usr/src/app:delegated
+      - node_modules:/usr/src/app/node_modules   # ← 匿名ではなく“名前付き”に固定！
+    depends_on:
+      - lavalink
+
+# ここを必ず追加
+volumes:
+  node_modules:

@@ -1,0 +1,11 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: ${LAVALINK_PASSWORD}
+  sources:
+    youtube: true
+    http: true
+    soundcloud: true

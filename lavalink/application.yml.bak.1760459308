@@ -1,0 +1,22 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  server:
+    password: ${LAVALINK_PASSWORD}
+    sources:
+      youtube: false           # 既定のYouTubeソースは無効
+      http: true
+      soundcloud: true
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-source:1.13.5"
+      repository: "https://maven.lavalink.dev/releases"
+      snapshot: false
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
