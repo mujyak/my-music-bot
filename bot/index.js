@@ -60,9 +60,17 @@ async function ensureConnectionV4(gid, channelId) {
     s.conn = null;
   }
   if (!s.conn) {
-    s.conn = await shoukaku.joinVoiceChannel({
-      guildId: gid, channelId, shardId: 0, deaf: true, nodeName: node.name
+   s.conn = await shoukaku.joinVoiceChannel({
+      guildId: gid,
+      channelId,
+      shardId: 0,
+      nodeName: node.name,
+      // 明示しておく：聞こえなくするのはOK（自分ミュートはNG）
+      deaf: true,
+      mute: false
     });
+    // 念のため：接続直後に self-mute を解除（server mute には効かない）
+    try { await s.conn.setMute(false); } catch {}
     // player events
     s.conn.on('end', async () => {
       const st = getState(gid);

@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - _JAVA_OPTIONS=-Xms512m -Xmx1024m
-      - LAVALINK_PASSWORD=pR8cH3n_x0vZx2Z7cV5NqY1L6tK9wM3b
+      - LAVALINK_PASSWORD=${LAVALINK_PASSWORD}
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
 
