@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+FROM node:20-alpine
+
+WORKDIR /usr/src/app
+
+# better-sqlite3 のネイティブビルドに必要なツール
+RUN apk add --no-cache python3 make g++
+
+# 依存インストール（まず package*.json だけコピー）
+# ※ コンテキストはリポジトリのルート想定。compose がそのルートを context にしている前提です。
+COPY ./bot/package*.json ./
+
+# lock が古い可能性があるので npm ci ではなく npm install を使用
+RUN npm install --omit=dev
+
+# アプリ本体を一式コピー（index.js や modules/xp/ など全部入る）
+COPY ./bot/. .
+
+# （容量節約したいならビルドツールを削除してもOK）
+# RUN apk del make g++ || true
+
+CMD ["node", "index.js"]

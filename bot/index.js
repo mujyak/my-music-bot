@@ -1,192 +1,211 @@
-import { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } from 'discord.js';
+// index.js — Totoro-bot core (music module extracted)
+// 目的: 起動・環境変数読込・スラッシュ登録・各モジュールと配線を一元管理するエントリポイント
+
+// ===== Imports =====
+import {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ChannelType,
+  PermissionFlagsBits,
+  AuditLogEvent
+} from 'discord.js';
 import { Shoukaku, Connectors } from 'shoukaku';
 
-// ---- env ----
-const { DISCORD_TOKEN, CLIENT_ID, GUILD_ID, LAVALINK_PASSWORD, ALLOW_GUILDS } = process.env;
-const ALLOW = (ALLOW_GUILDS || '').split(',').map(s => s.trim()).filter(Boolean);
+// XPモジュール（XPコマンドのビルドとハンドラ作成）
+import { initXpSystem, buildXpCommands } from './modules/xp/xp.js';
 
-// ---- lavalink node(s) ----
+// 誕生日通知（JST 0:00 に送信するスケジューラ）
+import { scheduleBirthdayNotifier } from './modules/birthday/notifier.js';
+
+// アワード（寝落ち/フリバ）機能のスラッシュ定義・イベント配線
+import { buildAwardCommands, wireAwardHandlers, dispatchAwardInteraction, setFreebattleConfig } from "./modules/awards/index.js";
+
+import { wireChatterHandlers } from "./modules/chatter/index.js";
+
+// 音楽モジュール（依存注入・コマンド・イベント配線）
+import {
+  installMusicModule,
+  buildMusicCommands,
+  wireMusicHandlers,
+  dispatchMusicInteraction
+} from './modules/music/index.js';
+
+// ===== Env =====
+const {
+  DISCORD_TOKEN,
+  CLIENT_ID,
+  GUILD_ID,
+  ALLOW_GUILDS,
+  LAVALINK_PASSWORD,
+  NOTICE_CHANNEL_ID,
+  TOTORO_DEBUG_RESOLVE // '1' で音楽解決ログON
+} = process.env;
+
+// 文字列を配列化する補助（カンマ/空白区切り対応）
+function splitList(v) {
+  return (v || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+}
+const ALLOW_SET = new Set(splitList(ALLOW_GUILDS));                      // 利用許可ギルド（空なら全許可）
+const REG_TARGET_SET = new Set([...splitList(GUILD_ID), ...ALLOW_SET]);  // スラッシュ登録先ギルド
+const DEBUG_RESOLVE = TOTORO_DEBUG_RESOLVE === '1';
+
+// ===== Constants =====
+const MAX_QUEUE = 10;
+
+// ===== Lavalink Nodes =====
 const NODES = [
   { name: 'main', url: 'lavalink:2333', auth: LAVALINK_PASSWORD, secure: false }
 ];
 
-// ---- slash commands ----
-const commands = [
-  new SlashCommandBuilder()
-    .setName('totoro_play')
-    .setDescription('URLまたはキーワード（複数可・スペース/改行区切り）で再生/追加')
-    .addStringOption(o => o.setName('query').setDescription('URLまたはキーワード').setRequired(true))
-    .toJSON(),
-  new SlashCommandBuilder().setName('totoro_skip').setDescription('次の曲へスキップ').toJSON(),
-  new SlashCommandBuilder().setName('totoro_loop').setDescription('今の曲を単曲ループ').toJSON(),
-  new SlashCommandBuilder().setName('totoro_loop_queue').setDescription('キュー全体をループ').toJSON(),
-  new SlashCommandBuilder().setName('totoro_loop_pueue').setDescription('（エイリアス）キュー全体をループ').toJSON(),
-  new SlashCommandBuilder().setName('totoro_leave').setDescription('退出＆キュークリア').toJSON(),
-  new SlashCommandBuilder().setName('totoro_queue').setDescription('キュー表示（先頭10件）').toJSON()
+// ===== Slash Commands (音楽以外) =====
+const coreCommands = [
+  ...buildXpCommands(),
+  ...buildAwardCommands(),
 ];
 
-// ---- register commands (guild) ----
-const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-
-// ---- discord client & shoukaku ----
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), NODES, {
-  moveOnDisconnect: false, resumable: true, resumableTimeout: 60
+// ===== Discord Client & Shoukaku =====
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages
+  ]
 });
-client.once('ready', () => console.log(`Logged in as ${client.user.tag}`));
 
-// ---- state ----
-const states = new Map(); // guildId -> { conn, queue, current, loop, playing }
-function getState(gid) {
-  if (!states.has(gid)) {
-    states.set(gid, { conn: null, queue: [], current: null, loop: 'off', playing: false });
-  }
-  return states.get(gid);
-}
-function getVoiceChannelId(i) {
-  return i.member?.voice?.channelId
-      || i.guild?.voiceStates?.cache?.get(i.user.id)?.channelId
-      || null;
-}
-// ---- voice connect (Shoukaku v4) ----
-async function ensureConnectionV4(gid, channelId) {
-  const s = getState(gid);
-  const node = shoukaku.nodes.get('main') ?? [...shoukaku.nodes.values()][0];
+const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), NODES, {
+  moveOnDisconnect: false,
+  resumable: true,
+  resumableTimeout: 60
+});
 
-  // 別VCに居たら作り直し
-  if (s.conn && s.conn.channelId && s.conn.channelId !== channelId) {
-    try { await s.conn.leaveChannel(); } catch {}
-    s.conn = null;
-  }
-  if (!s.conn) {
-   s.conn = await shoukaku.joinVoiceChannel({
-      guildId: gid,
-      channelId,
-      shardId: 0,
-      nodeName: node.name,
-      // 明示しておく：聞こえなくするのはOK（自分ミュートはNG）
-      deaf: true,
-      mute: false
-    });
-    // 念のため：接続直後に self-mute を解除（server mute には効かない）
-    try { await s.conn.setMute(false); } catch {}
-    // player events
-    s.conn.on('end', async () => {
-      const st = getState(gid);
-      if (st.loop === 'track' && st.current) { await st.conn.playTrack({ track: st.current.encoded }); return; }
-      if (st.loop === 'queue' && st.current) { st.queue.push(st.current); }
-      st.current = null; st.playing = false;
-      playNext(gid).catch(() => {});
-    });
-    s.conn.on('error', (e) => console.error(`[PlayerError][${gid}]`, e));
-  }
-  return s.conn;
-}
-// ---- play next ----
-async function playNext(gid) {
-  const s = getState(gid);
-  if (s.playing) return;
-  const next = s.queue.shift();
-  if (!next) return;
-  s.current = next;
-  s.playing = true;
-  await s.conn.playTrack({ track: next.encoded });
+// ===== Allowlist: ギルド参加時のフィルタ =====
+function isAllowedGuild(gid) {
+  return ALLOW_SET.size === 0 || ALLOW_SET.has(String(gid));
 }
 
-// ---- query helper ----
-function parseQueries(input) {
-  const parts = input.split(/\s+/).map(x => x.trim()).filter(Boolean).slice(0, 10);
-  if (parts.length === 0) return [];
-  const hasUrl = parts.some(p => /^https?:\/\//i.test(p));
-  return hasUrl ? parts : [parts.join(' ')];
-}
-// ---- resolve (compat) ----
-async function resolveOneCompat(node, q) {
-  const search = /^https?:\/\//i.test(q) ? q : `ytsearch:${q}`;
-  const res = await node.rest.resolve(search).catch(e => { console.error('[resolveOne]', e?.message || e); return null; });
-  if (!res) return null;
-  const tracks = res?.tracks || res?.data || [];
-  const isPlaylist = (res?.type === 'PLAYLIST') || (res?.loadType === 'playlist');
-  if (!Array.isArray(tracks) || tracks.length === 0) return null;
-  return isPlaylist ? tracks : tracks[0];
-}
-
-// ---- allowlist: invited to other guilds ----
 client.on('guildCreate', guild => {
-  if (ALLOW.length && !ALLOW.includes(guild.id)) {
+  if (!isAllowedGuild(guild.id)) {
     console.log(`[ALLOWLIST] not allowed guild ${guild.id} (${guild.name}) -> leaving`);
     guild.leave().catch(() => {});
   }
 });
-// ---- interactions ----
+
+// ===== Notice Helpers (音楽/XPの通知先選択) =====
+// 関数: 通知チャンネルを選ぶ（VCテキスト > 固定ID > システム/送信可能テキスト）
+async function findNoticeChannel(guild) {
+  try {
+    const me = guild.members.me ?? await guild.members.fetchMe();
+
+    // 1) 今いるVCのテキストチャットを最優先
+    const vcId = me?.voice?.channelId;
+    if (vcId) {
+      const vc = guild.channels.cache.get(vcId) ?? await guild.channels.fetch(vcId).catch(() => null);
+      const isTextLike =
+        (typeof vc?.isTextBased === 'function' && vc.isTextBased()) ||
+        vc?.type === ChannelType.GuildVoice;
+      const canSend =
+        vc?.viewable &&
+        vc?.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages);
+      if (isTextLike && canSend) {
+        return vc;
+      }
+    }
+
+    // 2) 固定チャンネルIDがあれば次点
+    if (NOTICE_CHANNEL_ID) {
+      const fixed = guild.channels.cache.get(NOTICE_CHANNEL_ID) ?? await guild.channels.fetch(NOTICE_CHANNEL_ID).catch(() => null);
+      if (fixed?.isTextBased?.() && !fixed.isThread?.() && fixed.viewable &&
+          fixed.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)) {
+        return fixed;
+      }
+    }
+
+    // 3) フォールバック: システムチャンネル or 送信可能テキスト
+    const ch =
+      guild.systemChannel ??
+      guild.channels.cache.find(c =>
+        c?.isTextBased?.() &&
+        !c?.isThread?.() &&
+        c?.viewable &&
+        c?.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)
+      );
+
+    return ch ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ギルドの適切な通知チャンネルにメッセージを送る（失敗しても落とさない）
+async function sendNotice(gid, content) {
+  try {
+    const guild = client.guilds.cache.get(gid);
+    if (!guild) return;
+    const ch = await findNoticeChannel(guild);
+    if (ch) await ch.send(content);
+  } catch (e) {
+    console.warn('[notice]', e?.message || e);
+  }
+}
+
+// 任意のチャンネルIDへ直接送る（送信可否を権限チェック）
+async function sendToChannel(gid, channelId, content) {
+  try {
+    const guild = client.guilds.cache.get(gid);
+    if (!guild) return false;
+    const ch = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
+    if (!ch) return false;
+    const me = guild.members.me ?? await guild.members.fetchMe();
+
+    const isTextLike =
+      (typeof ch.isTextBased === 'function' && ch.isTextBased()) ||
+      ch.type === ChannelType.GuildVoice;
+    const notThread = typeof ch.isThread === 'function' ? !ch.isThread() : true;
+    const perms = ch.permissionsFor(me);
+    const canSend =
+      ch.viewable &&
+      perms?.has(PermissionFlagsBits.ViewChannel) &&
+      perms?.has(PermissionFlagsBits.SendMessages);
+
+    if (isTextLike && notThread && canSend) {
+      await ch.send(content);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[sendToChannel]', e?.message || e);
+  }
+  return false;
+}
+
+// ===== Interactions (スラッシュ分岐) =====
+const xp = initXpSystem(client, (gid, content) => sendNotice(gid, content));
+
 client.on('interactionCreate', async i => {
   try {
     if (!i.isChatInputCommand()) return;
-    if (ALLOW.length && !ALLOW.includes(i.guildId)) {
+    if (!isAllowedGuild(i.guildId)) {
       return i.reply({ content: 'このサーバでは利用許可がありません。', ephemeral: true });
     }
-    const gid = i.guildId;
 
-    if (i.commandName === 'totoro_play') {
-      const channelId = getVoiceChannelId(i);
-      if (!channelId) return i.reply({ content: '先にボイスチャンネルに参加してね！', ephemeral: true });
-      const raw = i.options.getString('query', true);
-      const queries = parseQueries(raw);
-      if (queries.length === 0) return i.reply({ content: 'クエリが空っぽっぽい…', ephemeral: true });
-      await i.deferReply();
-      const node = shoukaku.nodes.get('main') ?? [...shoukaku.nodes.values()][0];
-      await ensureConnectionV4(gid, channelId);
-
-      let added = 0;
-      for (const q of queries) {
-        const r = await resolveOneCompat(node, q);
-        if (!r) continue;
-        const s = getState(gid);
-        if (Array.isArray(r)) { r.forEach(t => s.queue.push(t)); added += r.length; }
-        else { s.queue.push(r); added += 1; }
-      }
-      const s = getState(gid);
-      if (!s.playing) await playNext(gid);
-      return i.editReply({ content: added > 0 ? `${added}件キューに追加したよ！` : '追加できなかった…' });
+    // 1) XPコマンドへ委譲
+    if (['totoro_exp','totoro_exp_rank','totoro_exp_year','totoro_exp_year_rank','totoro_exp_management'].includes(i.commandName)) {
+      const handled = await xp.handleSlash?.(i);
+      if (handled !== false) return;
     }
 
-    if (i.commandName === 'totoro_skip') {
-      const s = getState(gid);
-      if (!s.conn) return i.reply({ content: '何も再生してないみたい。', ephemeral: true });
-      if (s.loop === 'track') s.loop = 'off';
-      await s.conn.stopTrack();
-      return i.reply({ content: '⏭ スキップしたよ（単曲ループは解除）。' });
-    }
-    if (i.commandName === 'totoro_loop') {
-      const s = getState(gid);
-      if (!s.current) return i.reply({ content: '今は何も再生してないみたい。', ephemeral: true });
-      s.loop = 'track';
-      return i.reply({ content: '🔁 単曲ループを有効にしたよ。スキップすると解除されるよ。' });
-    }
+    // 2) 音楽コマンドへ委譲
+    const handledMusic = await dispatchMusicInteraction(i);
+    if (handledMusic) return;
 
-    if (i.commandName === 'totoro_loop_queue' || i.commandName === 'totoro_loop_pueue') {
-      const s = getState(gid);
-      s.loop = 'queue';
-      return i.reply({ content: '🔁 キュー全体ループを有効にしたよ。' });
-    }
+    // 3) アワード（寝落ち/フリバ）コマンドへ委譲
+    const handledAwards = await dispatchAwardInteraction(i);
+    if (handledAwards) return;
 
-    if (i.commandName === 'totoro_leave') {
-      const s = getState(gid);
-      try { await s.conn?.leaveChannel(); } catch {}
-      s.conn = null; s.queue = []; s.current = null; s.playing = false; s.loop = 'off';
-      return i.reply({ content: '👋 退出してキューをクリアしたよ。' });
-    }
-    if (i.commandName === 'totoro_queue') {
-      const s = getState(gid);
-      if (!s.current && s.queue.length === 0) return i.reply({ content: 'キューは空だよ！', ephemeral: true });
-      const lines = [];
-      if (s.current) lines.push(`**▶ 再生中:** ${s.current.info?.title || '(unknown)'}`);
-      s.queue.slice(0, 10).forEach((t, idx) => lines.push(`${idx + 1}. ${t.info?.title || '(unknown)'}`));
-      const embed = new EmbedBuilder().setTitle('Totoro Queue').setDescription(lines.join('\n'))
-        .addFields({ name: 'Loop', value: s.loop, inline: true });
-      return i.reply({ embeds: [embed] });
-    }
+    // 4) その他（将来拡張）
   } catch (e) {
     console.error('[interaction] failed:', e);
     try {
@@ -196,9 +215,93 @@ client.on('interactionCreate', async i => {
   }
 });
 
-client.login(DISCORD_TOKEN);
+// ===== Command Registration =====
+async function registerCommands() {
+  if (!DISCORD_TOKEN) throw new Error('DISCORD_TOKEN is required');
+  if (!CLIENT_ID) throw new Error('CLIENT_ID is required');
 
-// debug logs (任意)
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+  const commands = [
+    ...buildMusicCommands(),
+    ...coreCommands
+  ];
+
+  if (REG_TARGET_SET.size > 0) {
+    for (const gid of REG_TARGET_SET) {
+      try {
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, gid), { body: commands });
+        console.log(`[slash] Registered GUILD commands to ${gid}`);
+      } catch (e) {
+        console.error(`[slash] Failed to register to ${gid}`, e?.message || e);
+      }
+    }
+  } else {
+    try {
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+      console.log('[slash] Registered GLOBAL commands (反映に時間がかかる場合があります)');
+    } catch (e) {
+      console.error('[slash] Failed to register GLOBAL commands', e?.message || e);
+    }
+  }
+}
+
+// ===== Boot =====
+client.once('clientReady', () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`[allow] ALLOW_GUILDS: ${ALLOW_SET.size ? [...ALLOW_SET].join(',') : '(not set = all allowed)'}`);
+  console.log(`[slash] target: ${REG_TARGET_SET.size ? [...REG_TARGET_SET].join(',') : 'GLOBAL'}`);
+
+  // 誕生日通知（JST 0:00に投稿）
+  scheduleBirthdayNotifier(client);
+
+  // フリバ募集集計の対象（ギルド→チャンネル/ロール）
+  setFreebattleConfig({
+    "1259933702381764764": { channelId: "1260037785604198504", roleId: "1275855651003957389" },
+    // "本番ギルドID": { channelId: "本番チャンネルID", roleId: "本番ロールID" },
+  });
+
+  // アワード機能（寝落ち検知・フリバ集計）のイベント購読
+  wireAwardHandlers(client);
+  wireChatterHandlers(client);
+});
+
+async function main() {
+  await client.login(DISCORD_TOKEN);
+
+  // スラッシュ登録対象の健全性チェック（Botが未参加のギルドは登録スキップ）
+  if (REG_TARGET_SET.size > 0) {
+    const joined = new Set(client.guilds.cache.map(g => g.id));
+    for (const gid of [...REG_TARGET_SET]) {
+      if (!joined.has(gid)) {
+        console.warn(`[slash] skip ${gid}: bot not in guild (join first)`);
+        REG_TARGET_SET.delete(gid);
+      }
+    }
+  }
+
+  // 音楽モジュールへ依存を注入（通知・送信・デバッグ・上限）
+  installMusicModule({
+    client,
+    shoukaku,
+    sendNotice,
+    sendToChannel,
+    debugResolve: DEBUG_RESOLVE,
+    maxQueue: MAX_QUEUE
+  });
+  wireMusicHandlers(client);
+
+  // スラッシュ登録
+  await registerCommands();
+}
+
+// 起動
+main().catch(e => {
+  console.error('[boot] failed', e);
+  process.exit(1);
+});
+
+// ===== Shoukaku debug logs (optional) =====
 shoukaku.on('ready', name => console.log(`[Shoukaku] node ${name} ready`));
 shoukaku.on('error', (name, error) => console.error(`[Shoukaku] node ${name} error`, error?.message || error));
 shoukaku.on('close', (name, code, reason) => console.warn(`[Shoukaku] node ${name} closed`, code, reason?.toString?.()));

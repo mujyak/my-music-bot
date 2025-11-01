@@ -1,6 +1,15 @@
 FROM node:20-alpine
-WORKDIR /app
-COPY package.json package-lock.json* ./
+
+WORKDIR /usr/src/app
+
+# better-sqlite3 ビルドに必要なツール
+RUN apk add --no-cache python3 make g++
+
+# まず package*.json だけコピーして依存を入れる
+COPY package*.json ./
 RUN npm install --omit=dev
-COPY index.js ./
+
+# アプリ本体を一式コピー（index.js, modules/xp など）
+COPY . .
+
 CMD ["node", "index.js"]

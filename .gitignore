@@ -12,3 +12,7 @@ build/
 Thumbs.db
 lavalink/application.yml
 lavalink/logs/
+modules/chatter/messages.js
+bot/data/
+bot/data/*.json
+*.bak
