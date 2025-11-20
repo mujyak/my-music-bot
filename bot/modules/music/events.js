@@ -55,7 +55,7 @@ export function attachMusicEventWires(client) {
       await playNext(gid);
       const nothingLeft = !st.playing && st.queue.length === 0;
       if (nothingLeft && !st.idleTimer) {
-        await notifyIdleToVc(gid, '⛳ 次に再生する曲はありません。3分後に退出します。');
+        await notifyIdleToVc(gid, '次に再生する曲がないかも…３分後落ちようかな(:3_ヽ)_');
         scheduleIdle(gid, 'end-empty');
       }
     });
@@ -149,7 +149,7 @@ export function attachMusicEventWires(client) {
       await leaveHardAndClear(gid);
 
       if (fromId) {
-        const ok = await sendToChannel(gid, fromId, '🔇 ボットは**強制的に退出**させられました。キューはクリアしました。');
+        const ok = await sendToChannel(gid, fromId, '蹴り飛ばされた…(´・ω・｀)');
         console.log(`[voice] forced-disconnect(policy): sent=${ok} gid=${gid} ch=${fromId}`);
       } else {
         console.log(`[voice] forced-disconnect(policy) but no fromId, gid=${gid}`);
@@ -166,7 +166,7 @@ export function attachMusicEventWires(client) {
       await leaveHardAndClear(gid);
 
       if (fromId) {
-        const ok = await sendToChannel(gid, fromId, '🔇 ボットは**強制的に移動**させられたため、退出しました。キューはクリアしました。');
+        const ok = await sendToChannel(gid, fromId, '移動させられた…(´・ω・｀)');
         console.log(`[voice] forced-move(policy): sent=${ok} gid=${gid} from=${fromId} to=${toId}`);
       } else {
         console.log(`[voice] forced-move(policy) but no fromId, gid=${gid} to=${toId}`);

@@ -7,7 +7,8 @@ import {
   leaveCommand,
   queueCommand,
   loopCommand,
-  loopQueueCommand
+  loopQueueCommand,
+  shuffleCommand
 } from './service.js';
 import { getState } from './state.js';
 
@@ -17,23 +18,25 @@ const CMD = {
   LEAVE: 'totoro_leave',
   QUEUE: 'totoro_queue',
   LOOP: 'totoro_loop',
-  LOOP_QUEUE: 'totoro_loop_queue'
+  LOOP_QUEUE: 'totoro_loop_queue',
+  SHUFFLE: 'totoro_shuffle'
 };
 
 export function buildMusicSlashBuilders() {
   return [
     new SlashCommandBuilder()
       .setName(CMD.PLAY)
-      .setDescription('URLまたはキーワードで再生/追加（YouTubeのみ・単発）')
+      .setDescription('音楽を再生（YouTube）')
       .addStringOption(o =>
-        o.setName('query').setDescription('URLまたはキーワード').setRequired(true)
+        o.setName('input').setDescription('URLまたはキーワード').setRequired(true)
       )
       .toJSON(),
     new SlashCommandBuilder().setName(CMD.SKIP).setDescription('次の曲へスキップ').toJSON(),
-    new SlashCommandBuilder().setName(CMD.LEAVE).setDescription('退出＆キュークリア').toJSON(),
-    new SlashCommandBuilder().setName(CMD.QUEUE).setDescription('キュー表示（先頭10件）').toJSON(),
-    new SlashCommandBuilder().setName(CMD.LOOP).setDescription('単曲ループを切替').toJSON(),
-    new SlashCommandBuilder().setName(CMD.LOOP_QUEUE).setDescription('キューループを切替').toJSON()
+    new SlashCommandBuilder().setName(CMD.LEAVE).setDescription('退出').toJSON(),
+    new SlashCommandBuilder().setName(CMD.QUEUE).setDescription('プレイリスト表示').toJSON(),
+    new SlashCommandBuilder().setName(CMD.LOOP).setDescription('単曲ループ（skipで解除）').toJSON(),
+    new SlashCommandBuilder().setName(CMD.LOOP_QUEUE).setDescription('全体ループ').toJSON(),
+    new SlashCommandBuilder().setName(CMD.SHUFFLE).setDescription('シャッフル').toJSON()
   ];
 }
 
@@ -48,7 +51,7 @@ export async function handleInteraction(itx) {
     try {
       switch (name) {
         case CMD.PLAY: {
-          const q = itx.options.getString('query', true);
+          const q = itx.options.getString('input', true);
           const res = await playCommand({ itx, q });
           return itx.deferred ? itx.editReply(res) : itx.reply(res);
         }
@@ -72,16 +75,21 @@ export async function handleInteraction(itx) {
           const res = await loopQueueCommand({ itx });
           return itx.reply(res);
         }
+        case CMD.SHUFFLE: {
+          const res = await shuffleCommand({ itx });
+          return itx.reply(res);
+        }
         default:
           return false;
       }
     } catch (e) {
       // ユーザー通知（失敗時に握り潰さない）
       try {
-        if (itx.deferred) {
-          await itx.editReply('処理に失敗したかも…ログを見てみてね。');
+        const msg = '処理に失敗したかも…無ジャ込みに報告してね';
+        if (itx.deferred || itx.replied) {
+          await itx.editReply(msg);
         } else {
-          await itx.reply({ content: '処理に失敗したかも…', ephemeral: true });
+          await itx.reply({ content: msg, ephemeral: true });
         }
       } catch {}
       console.error('[music/commands] handler failed', e);

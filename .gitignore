@@ -16,3 +16,4 @@ modules/chatter/messages.js
 bot/data/
 bot/data/*.json
 *.bak
+bot/data/teams/ng.json

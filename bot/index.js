@@ -1,32 +1,51 @@
-// index.js — Totoro-bot core (music module extracted)
-// 目的: 起動・環境変数読込・スラッシュ登録・各モジュールと配線を一元管理するエントリポイント
+// index.js — Totoro-bot core
+// 目的: 起動・環境変数読込・スラッシュ登録・各モジュールを一元配線するエントリポイント
 
 // ===== Imports =====
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   REST,
   Routes,
-  SlashCommandBuilder,
-  EmbedBuilder,
   ChannelType,
   PermissionFlagsBits,
-  AuditLogEvent
+  MessageFlags
 } from 'discord.js';
 import { Shoukaku, Connectors } from 'shoukaku';
 
-// XPモジュール（XPコマンドのビルドとハンドラ作成）
+// XPモジュール
 import { initXpSystem, buildXpCommands } from './modules/xp/xp.js';
 
-// 誕生日通知（JST 0:00 に送信するスケジューラ）
+// 誕生日通知（JST 0:00）
 import { scheduleBirthdayNotifier } from './modules/birthday/notifier.js';
 
-// アワード（寝落ち/フリバ）機能のスラッシュ定義・イベント配線
-import { buildAwardCommands, wireAwardHandlers, dispatchAwardInteraction, setFreebattleConfig } from "./modules/awards/index.js";
+// アワード（寝落ち/フリバ）
+import {
+  buildAwardCommands,
+  wireAwardHandlers,
+  dispatchAwardInteraction,
+  setFreebattleConfig
+} from './modules/awards/index.js';
 
-import { wireChatterHandlers } from "./modules/chatter/index.js";
+// おしゃべり
+import { wireChatterHandlers } from './modules/chatter/index.js';
 
-// 音楽モジュール（依存注入・コマンド・イベント配線）
+// チーム分け（リアクション募集＋NGペア回避）
+import { buildTeamsCommands, wireTeamHandlers } from './modules/teams/index.js';
+
+import { buildDiceCommands, wireDiceHandlers } from './modules/dice/index.js';
+
+import {
+  buildGachaCommands,
+  handleGachaSlash,
+  dispatchGachaInteraction
+} from './modules/gacha/index.js';
+
+import { wireRoleHandlers } from './modules/roles/index.js';
+
+
+// 音楽（Shoukaku）
 import {
   installMusicModule,
   buildMusicCommands,
@@ -45,16 +64,16 @@ const {
   TOTORO_DEBUG_RESOLVE // '1' で音楽解決ログON
 } = process.env;
 
-// 文字列を配列化する補助（カンマ/空白区切り対応）
+// ===== Helpers =====
 function splitList(v) {
   return (v || '').split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
 }
-const ALLOW_SET = new Set(splitList(ALLOW_GUILDS));                      // 利用許可ギルド（空なら全許可）
-const REG_TARGET_SET = new Set([...splitList(GUILD_ID), ...ALLOW_SET]);  // スラッシュ登録先ギルド
+const ALLOW_SET = new Set(splitList(ALLOW_GUILDS));                      // 利用許可ギルド（空=全許可）
+const REG_TARGET_SET = new Set([...splitList(GUILD_ID), ...ALLOW_SET]);  // スラッシュ登録対象
 const DEBUG_RESOLVE = TOTORO_DEBUG_RESOLVE === '1';
 
 // ===== Constants =====
-const MAX_QUEUE = 10;
+const MAX_QUEUE = 100;
 
 // ===== Lavalink Nodes =====
 const NODES = [
@@ -65,6 +84,9 @@ const NODES = [
 const coreCommands = [
   ...buildXpCommands(),
   ...buildAwardCommands(),
+  ...buildTeamsCommands(),
+  ...buildDiceCommands(),
+  ...buildGachaCommands()
 ];
 
 // ===== Discord Client & Shoukaku =====
@@ -72,8 +94,16 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages
-  ]
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMessageReactions, // リアクション収集に必須
+  ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction,
+    Partials.User,
+    Partials.GuildMember,
+  ],
 });
 
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), NODES, {
@@ -94,45 +124,46 @@ client.on('guildCreate', guild => {
   }
 });
 
-// ===== Notice Helpers (音楽/XPの通知先選択) =====
-// 関数: 通知チャンネルを選ぶ（VCテキスト > 固定ID > システム/送信可能テキスト）
+// ===== Notice Helpers（安全: テキストチャンネル限定） =====
+
+// 通知先チャンネル選定（固定ID > システム > 最初の送信可能テキスト）
 async function findNoticeChannel(guild) {
   try {
     const me = guild.members.me ?? await guild.members.fetchMe();
 
-    // 1) 今いるVCのテキストチャットを最優先
-    const vcId = me?.voice?.channelId;
-    if (vcId) {
-      const vc = guild.channels.cache.get(vcId) ?? await guild.channels.fetch(vcId).catch(() => null);
-      const isTextLike =
-        (typeof vc?.isTextBased === 'function' && vc.isTextBased()) ||
-        vc?.type === ChannelType.GuildVoice;
-      const canSend =
-        vc?.viewable &&
-        vc?.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages);
-      if (isTextLike && canSend) {
-        return vc;
-      }
-    }
-
-    // 2) 固定チャンネルIDがあれば次点
+    // 1) 固定チャンネルIDがあれば最優先
     if (NOTICE_CHANNEL_ID) {
-      const fixed = guild.channels.cache.get(NOTICE_CHANNEL_ID) ?? await guild.channels.fetch(NOTICE_CHANNEL_ID).catch(() => null);
-      if (fixed?.isTextBased?.() && !fixed.isThread?.() && fixed.viewable &&
-          fixed.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)) {
+      const fixed = guild.channels.cache.get(NOTICE_CHANNEL_ID)
+        ?? await guild.channels.fetch(NOTICE_CHANNEL_ID).catch(() => null);
+      if (
+        fixed &&
+        typeof fixed.isTextBased === 'function' && fixed.isTextBased() &&
+        !(typeof fixed.isThread === 'function' && fixed.isThread()) &&
+        fixed.viewable &&
+        fixed.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)
+      ) {
         return fixed;
       }
     }
 
-    // 3) フォールバック: システムチャンネル or 送信可能テキスト
-    const ch =
-      guild.systemChannel ??
-      guild.channels.cache.find(c =>
-        c?.isTextBased?.() &&
-        !c?.isThread?.() &&
-        c?.viewable &&
-        c?.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)
-      );
+    // 2) システムチャンネル
+    const sys = guild.systemChannel;
+    if (
+      sys &&
+      sys.viewable &&
+      sys.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages)
+    ) {
+      return sys;
+    }
+
+    // 3) 送信可能な通常テキストから探す
+    const ch = guild.channels.cache.find(c =>
+      typeof c?.isTextBased === 'function' && c.isTextBased() &&
+      !(typeof c.isThread === 'function' && c.isThread()) &&
+      c.viewable &&
+      c.permissionsFor(me)?.has(PermissionFlagsBits.SendMessages) &&
+      c.type !== ChannelType.GuildAnnouncement // ここは除外（権限が厳しいことが多い）
+    );
 
     return ch ?? null;
   } catch {
@@ -140,7 +171,7 @@ async function findNoticeChannel(guild) {
   }
 }
 
-// ギルドの適切な通知チャンネルにメッセージを送る（失敗しても落とさない）
+// ギルドの適切な通知チャンネルにメッセージ送信（失敗しても落とさない）
 async function sendNotice(gid, content) {
   try {
     const guild = client.guilds.cache.get(gid);
@@ -152,26 +183,28 @@ async function sendNotice(gid, content) {
   }
 }
 
-// 任意のチャンネルIDへ直接送る（送信可否を権限チェック）
+// 任意のチャンネルIDへ直接送る（テキスト限定 & 権限チェック）
 async function sendToChannel(gid, channelId, content) {
   try {
     const guild = client.guilds.cache.get(gid);
     if (!guild) return false;
-    const ch = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
+
+    const ch = guild.channels.cache.get(channelId)
+      ?? await guild.channels.fetch(channelId).catch(() => null);
     if (!ch) return false;
+
     const me = guild.members.me ?? await guild.members.fetchMe();
 
-    const isTextLike =
-      (typeof ch.isTextBased === 'function' && ch.isTextBased()) ||
-      ch.type === ChannelType.GuildVoice;
+    const isTextLike = (typeof ch.isTextBased === 'function' && ch.isTextBased());
     const notThread = typeof ch.isThread === 'function' ? !ch.isThread() : true;
     const perms = ch.permissionsFor(me);
     const canSend =
+      isTextLike && notThread &&
       ch.viewable &&
       perms?.has(PermissionFlagsBits.ViewChannel) &&
       perms?.has(PermissionFlagsBits.SendMessages);
 
-    if (isTextLike && notThread && canSend) {
+    if (canSend) {
       await ch.send(content);
       return true;
     }
@@ -181,39 +214,81 @@ async function sendToChannel(gid, channelId, content) {
   return false;
 }
 
-// ===== Interactions (スラッシュ分岐) =====
+// ===== Interactions（スラッシュ分岐） =====
 const xp = initXpSystem(client, (gid, content) => sendNotice(gid, content));
 
 client.on('interactionCreate', async i => {
   try {
-    if (!i.isChatInputCommand()) return;
-    if (!isAllowedGuild(i.guildId)) {
-      return i.reply({ content: 'このサーバでは利用許可がありません。', ephemeral: true });
+    // ---- 利用許可ギルドチェック（共通） ----
+    if (i.guildId && !isAllowedGuild(i.guildId)) {
+      if (i.isChatInputCommand()) {
+        // スラッシュコマンドは一応メッセージを返す
+        return i.reply({
+          content: 'このサーバでは利用許可がありません。',
+          ephemeral: true
+        });
+      }
+      // ボタンやセレクトは黙って無視
+      return;
     }
 
-    // 1) XPコマンドへ委譲
-    if (['totoro_exp','totoro_exp_rank','totoro_exp_year','totoro_exp_year_rank','totoro_exp_management'].includes(i.commandName)) {
+    // ---- ① ガチャのボタン / セレクト処理 ----
+    // （このリスナーは今までボタンを完全無視していたので、
+    //  他モジュールとの競合は発生しない想定）
+    if (i.isButton() || i.isStringSelectMenu()) {
+      const handledGacha = await dispatchGachaInteraction(i);
+      if (handledGacha) return;
+      // ここでは他のボタンは触らず、そのまま return して終了。
+      // 他モジュール（teams / awards など）は wireXXXHandlers 内で
+      // 自前の interactionCreate リスナーを持っているので、
+      // そっちが処理してくれる。
+      return;
+    }
+
+    // ---- ② ここからスラッシュコマンドだけを見る ----
+    if (!i.isChatInputCommand()) return;
+
+    // 2-1) XPコマンド
+    if ([
+      'totoro_exp',
+      'totoro_exp_rank',
+      'totoro_exp_year',
+      'totoro_exp_year_rank',
+      'totoro_exp_management'
+    ].includes(i.commandName)) {
       const handled = await xp.handleSlash?.(i);
       if (handled !== false) return;
     }
 
-    // 2) 音楽コマンドへ委譲
+    // 2-2) 音楽コマンド
     const handledMusic = await dispatchMusicInteraction(i);
     if (handledMusic) return;
 
-    // 3) アワード（寝落ち/フリバ）コマンドへ委譲
+    // 2-3) アワード（寝落ち / フリバ）
     const handledAwards = await dispatchAwardInteraction(i);
     if (handledAwards) return;
 
-    // 4) その他（将来拡張）
+    // 2-4) ガチャスラッシュコマンド
+    // ※ /totoro_gacha 以外なら false が返ってそのままスルーされる
+    const handledGachaSlash = await handleGachaSlash(i);
+    if (handledGachaSlash) return;
+
+    // 2-5) その他は各モジュールの wire 側（例：teams）が拾う
   } catch (e) {
     console.error('[interaction] failed:', e);
     try {
-      if (i.deferred) await i.editReply('エラーが起きたみたい…ログを見てみてね。');
-      else await i.reply({ content: 'エラーが起きたみたい…', ephemeral: true });
+      if (i.deferred) {
+        await i.editReply('エラーが起きたみたい…ログを見てみてね。');
+      } else {
+        await i.reply({
+          content: 'エラーが起きたみたい…',
+          flags: MessageFlags.Ephemeral
+        });
+      }
     } catch {}
   }
 });
+
 
 // ===== Command Registration =====
 async function registerCommands() {
@@ -221,10 +296,9 @@ async function registerCommands() {
   if (!CLIENT_ID) throw new Error('CLIENT_ID is required');
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-
   const commands = [
     ...buildMusicCommands(),
-    ...coreCommands
+    ...coreCommands, // XP / Awards / Teams
   ];
 
   if (REG_TARGET_SET.size > 0) {
@@ -246,30 +320,43 @@ async function registerCommands() {
   }
 }
 
-// ===== Boot =====
-client.once('clientReady', () => {
+// ===== Ready （互換: ready / clientReady のどちらでも一度だけ） =====
+function onReadyOnce() {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`[allow] ALLOW_GUILDS: ${ALLOW_SET.size ? [...ALLOW_SET].join(',') : '(not set = all allowed)'}`);
   console.log(`[slash] target: ${REG_TARGET_SET.size ? [...REG_TARGET_SET].join(',') : 'GLOBAL'}`);
 
-  // 誕生日通知（JST 0:00に投稿）
+  // 誕生日通知（JST 0:00）
   scheduleBirthdayNotifier(client);
 
   // フリバ募集集計の対象（ギルド→チャンネル/ロール）
   setFreebattleConfig({
     "1259933702381764764": { channelId: "1260037785604198504", roleId: "1275855651003957389" },
-    // "本番ギルドID": { channelId: "本番チャンネルID", roleId: "本番ロールID" },
+    "993960755470794792": { channelId: "1208720170349105223", roleIds: ["1246696197947785250","1359709079651745802"] },
   });
 
-  // アワード機能（寝落ち検知・フリバ集計）のイベント購読
+  // イベント購読（アワード / おしゃべり / チーム）
   wireAwardHandlers(client);
   wireChatterHandlers(client);
-});
+  wireTeamHandlers(client, { sendToChannel });
+  wireDiceHandlers(client);
+  wireRoleHandlers(client);
+}
 
+let readyFired = false;
+function onceReadyWrapper() {
+  if (readyFired) return;
+  readyFired = true;
+  onReadyOnce();
+}
+
+client.once('clientReady', onceReadyWrapper);
+
+// ===== Boot =====
 async function main() {
   await client.login(DISCORD_TOKEN);
 
-  // スラッシュ登録対象の健全性チェック（Botが未参加のギルドは登録スキップ）
+  // スラッシュ登録対象の健全性チェック（Bot未参加ギルドは登録スキップ）
   if (REG_TARGET_SET.size > 0) {
     const joined = new Set(client.guilds.cache.map(g => g.id));
     for (const gid of [...REG_TARGET_SET]) {
@@ -295,13 +382,12 @@ async function main() {
   await registerCommands();
 }
 
-// 起動
 main().catch(e => {
   console.error('[boot] failed', e);
   process.exit(1);
 });
 
-// ===== Shoukaku debug logs (optional) =====
+// ===== Shoukaku debug logs（任意） =====
 shoukaku.on('ready', name => console.log(`[Shoukaku] node ${name} ready`));
 shoukaku.on('error', (name, error) => console.error(`[Shoukaku] node ${name} error`, error?.message || error));
 shoukaku.on('close', (name, code, reason) => console.warn(`[Shoukaku] node ${name} closed`, code, reason?.toString?.()));

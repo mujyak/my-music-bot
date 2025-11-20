@@ -23,11 +23,16 @@ const isYouTubeHost = (h) => {
   return host === 'youtu.be' || host.endsWith('youtube.com');
 };
 
-// 共有リンク由来の“余計”なパラメータは捨てる（vだけ残す）
+// 共有リンク由来の“余計”なパラメータは捨てる
+// 単発: v だけ残す / プレイリスト併用: v と list（任意で index）を残す
 const stripYouTubeParams = (urlObj) => {
   const keep = new URLSearchParams();
   const v = urlObj.searchParams.get('v');
+  const list = urlObj.searchParams.get('list');
+  const index = urlObj.searchParams.get('index'); // 任意
   if (v) keep.set('v', v);
+  if (list) keep.set('list', list);
+  if (index) keep.set('index', index);
   // t / start など開始位置は今回は未対応にする（必要ならここでkeepする）
   urlObj.search = keep.toString() ? `?${keep.toString()}` : '';
   urlObj.hash = ''; // #t= なども消す
@@ -39,7 +44,8 @@ const stripYouTubeParams = (urlObj) => {
  * - youtu.be/<id>  → https://www.youtube.com/watch?v=<id>
  * - youtube.com/shorts/<id> → .../watch?v=<id>
  * - m./music. サブドメインも吸収
- * - watch?v= 以外のクエリ（list, index, si, pp, feature など）は全削除
+ * - watch?v= のときは v を保持し、プレイリスト併用なら list（任意で index）も保持
+ * - 不要な共有系クエリ（si, pp, feature など）は削除
  */
 export function normalizeYouTubeUrl(input) {
   const raw = cleanText(input);
@@ -59,6 +65,11 @@ export function normalizeYouTubeUrl(input) {
     if (id) {
       const out = new URL('https://www.youtube.com/watch');
       out.searchParams.set('v', id);
+      // もし元URLに list があれば引き継ぐ
+      const list = u.searchParams.get('list');
+      const index = u.searchParams.get('index');
+      if (list) out.searchParams.set('list', list);
+      if (index) out.searchParams.set('index', index);
       return stripYouTubeParams(out).toString();
     }
     return input;
@@ -73,14 +84,26 @@ export function normalizeYouTubeUrl(input) {
     if (id) {
       const out = new URL('https://www.youtube.com/watch');
       out.searchParams.set('v', id);
+      const list = u.searchParams.get('list');
+      const index = u.searchParams.get('index');
+      if (list) out.searchParams.set('list', list);
+      if (index) out.searchParams.set('index', index);
       return stripYouTubeParams(out).toString();
     }
     return input;
   }
 
   // /watch?v=...
-  if (path === '/watch' && u.searchParams.has('v')) {
+  if (path === '/watch' && (u.searchParams.has('v') || u.searchParams.has('list'))) {
     return stripYouTubeParams(u).toString();
+  }
+
+  // /playlist?list=...
+  if (path === '/playlist' && u.searchParams.has('list')) {
+    const out = new URL('https://www.youtube.com/playlist');
+    out.searchParams.set('list', u.searchParams.get('list'));
+    // index 等は playlist では通常不要、明示的に落とす
+    return out.toString();
   }
 
   // /embed/<id> → watch?v=
@@ -89,6 +112,10 @@ export function normalizeYouTubeUrl(input) {
     if (id) {
       const out = new URL('https://www.youtube.com/watch');
       out.searchParams.set('v', id);
+      const list = u.searchParams.get('list');
+      const index = u.searchParams.get('index');
+      if (list) out.searchParams.set('list', list);
+      if (index) out.searchParams.set('index', index);
       return stripYouTubeParams(out).toString();
     }
     return input;
@@ -100,6 +127,10 @@ export function normalizeYouTubeUrl(input) {
     if (id) {
       const out = new URL('https://www.youtube.com/watch');
       out.searchParams.set('v', id);
+      const list = u.searchParams.get('list');
+      const index = u.searchParams.get('index');
+      if (list) out.searchParams.set('list', list);
+      if (index) out.searchParams.set('index', index);
       return stripYouTubeParams(out).toString();
     }
     return input;

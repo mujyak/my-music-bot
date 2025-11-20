@@ -75,6 +75,7 @@ export const BIRTHDAYS = [
   { name: "りりちよ", month: 11, day: 2 },
   { name: "しろりんご", month: 11, day: 3 },
   { name: "らいか", month: 11, day: 11 },
+  { name: "テスト", month: 11, day: 13 },
   { name: "まよまよ", month: 11, day: 20 },
   { name: "黄色い人", month: 11, day: 24 },
   { name: "セイ", month: 12, day: 1 },

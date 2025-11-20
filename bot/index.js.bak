@@ -36,7 +36,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), NODES, {
   moveOnDisconnect: false, resumable: true, resumableTimeout: 60
 });
-client.once('ready', () => console.log(`Logged in as ${client.user.tag}`));
+client.once('clientready', () => console.log(`Logged in as ${client.user.tag}`));
 const states = new Map();
 function getState(gid) {
   if (!states.has(gid)) states.set(gid, { conn: null, queue: [], current: null, loop: 'off', playing: false });
