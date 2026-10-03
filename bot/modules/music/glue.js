@@ -13,20 +13,30 @@ let GLUE = {
   shoukaku: null,
 
   /**
-   * 通知（テキストCHやVCのチャットへ投稿）: 注入されない限り何もしない
+   * 通知を送るための抽象関数。
+   * 実体は大元の index.js 側で注入する。
+   * どのチャンネルへ送るかは注入側の実装に委ねる。
+   *
+   * 想定呼び出し:
+   *   sendNotice(gid, payload)
+   *   sendNotice(gid, content, options)
+   * など、注入実装に合わせて扱う。
+   *
    * @param {string} _gid
-   * @param {string} _content
-   * @param {object} [_options]
+   * @param {...any} _args
    * @returns {Promise<boolean>} 送信できたら true
    */
   sendNotice: async () => false,
 
   /**
-   * 任意のチャンネルへ直接送る（VCに送れた時だけ出す想定）
+   * 任意のチャンネルへ直接送る（主にVC/テキストチャンネル向け）
+   * 実際の呼び出し形は sendToChannel(gid, channelId, payload)。
+   * 3引数目には Discord の message payload
+   * （例: { content }, { embeds: [...] }）をそのまま渡す。
+   *
    * @param {string} _gid
    * @param {string} _channelId
-   * @param {string} _content
-   * @param {object} [_options]
+   * @param {object} _payload Discord message payload
    * @returns {Promise<boolean>} 送信できたら true
    */
   sendToChannel: async () => false,

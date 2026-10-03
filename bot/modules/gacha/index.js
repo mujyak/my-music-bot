@@ -24,6 +24,9 @@ const PICKUP_MULTI_4 = 21;
 // 3枚コラボ: 上記以外すべて
 const PICKUP_MULTI_3 = 28;
 
+// 2枚コラボ
+const PICKUP_MULTI_2 = 28;
+
 // ギルギアの属性ピック倍率（赤/青/緑のうち1色だけ2倍）
 const ATTRIBUTE_PICKUP = 2;
 
@@ -38,6 +41,10 @@ const CARD_FILE = path.resolve(process.cwd(), 'data', 'gacha', 'cards.json');
 // コラボ一覧（表示名と内部ID）
 // ※「略称」をそのまま表示に使う。IDはカスタムID用のASCIIスラグ。
 const COLLAB_LIST = [
+  { key: '鋼の錬金術師', id: 'collab-hagane' },
+  { key: '雀魂', id: 'collab-jyant' },
+  { key: 'チェンソーマンレゼ', id: 'collab-reze' },
+  { key: 'Fake', id: 'collab-fake' },
   { key: 'ポプテピ', id: 'collab-poptepi' },
   { key: '影実', id: 'collab-kagejitsu' },
   { key: 'ハンター', id: 'collab-hunter' },
@@ -102,7 +109,13 @@ const GROUP_4 = new Set([
   'SAO',
   'Fate',
   'チェンソーマン',
-  'ハンター'
+  'ハンター',
+  'Fake'
+]);
+
+// 2枚コラボ
+const GROUP_2 = new Set([
+  'チェンソーマンレゼ'
 ]);
 
 // それ以外は 3枚グループ扱い（Set は不要）
@@ -112,6 +125,7 @@ function getPickupMultiplier(collabName) {
   if (GROUP_6.has(collabName)) return PICKUP_MULTI_6;
   if (GROUP_5.has(collabName)) return PICKUP_MULTI_5;
   if (GROUP_4.has(collabName)) return PICKUP_MULTI_4;
+  if (GROUP_2.has(collabName)) return PICKUP_MULTI_2;
   return PICKUP_MULTI_3; // その他は3枚グループ
 }
 
@@ -119,6 +133,10 @@ function getPickupMultiplier(collabName) {
 // ※ urRate/srRate を変えたいコラボだけ書き換えればOK。
 //   未指定の項目は urRate=0.02, srRate=0.18, allowBaseUr=true として扱う。
 const COLLAB_CONFIG = {
+  '鋼の錬金術師': { urRate: 0.02, srRate: 0.18 },
+  '雀魂': { urRate: 0.02, srRate: 0.18 },
+  'チェンソーマンレゼ': { urRate: 0.02, srRate: 0.18 },
+  'Fake': { urRate: 0.02, srRate: 0.18},
   'ポプテピ': { urRate: 0.02, srRate: 0.18 },
   '影実':     { urRate: 0.02, srRate: 0.18 },
   'ハンター': { urRate: 0.02, srRate: 0.18 },
@@ -439,35 +457,40 @@ function buildGachaSelectComponents() {
       .setStyle(ButtonStyle.Primary)
   );
 
-  // コラボを2つのセレクトメニューに分割する（1〜15 / 16〜30）
-  const firstHalf = COLLAB_LIST.slice(0, 15);
-  const secondHalf = COLLAB_LIST.slice(15);
+  // Discord制約:
+  // - SelectMenuのoptionsは最大25個
+  // - 1メッセージのActionRowは最大5行
+  //   → baseRowを含めると select は最大4個までが安全（= コラボ最大100個まで）
+  const MAX_OPTIONS = 25;
+  const MAX_SELECT_ROWS = 4;
 
-  const collabSelect1 = new StringSelectMenuBuilder()
-    .setCustomId('gacha:collab:1')
-    .setPlaceholder('コラボガチャを選択 (1/2)')
-    .addOptions(
-      firstHalf.map(entry => ({
-        label: entry.key,
-        value: entry.id
-      }))
-    );
+  // 25個ずつ chunk
+  const chunks = [];
+  for (let i = 0; i < COLLAB_LIST.length; i += MAX_OPTIONS) {
+    chunks.push(COLLAB_LIST.slice(i, i + MAX_OPTIONS));
+  }
 
-  const collabSelect2 = new StringSelectMenuBuilder()
-    .setCustomId('gacha:collab:2')
-    .setPlaceholder('コラボガチャを選択 (2/2)')
-    .addOptions(
-      secondHalf.map(entry => ({
-        label: entry.key,
-        value: entry.id
-      }))
-    );
+  // 行数が溢れる場合は切る（必要なら将来ページング対応）
+  const usableChunks = chunks.slice(0, MAX_SELECT_ROWS);
+  const totalMenus = usableChunks.length;
 
-  const row1 = new ActionRowBuilder().addComponents(collabSelect1);
-  const row2 = new ActionRowBuilder().addComponents(collabSelect2);
+  const selectRows = usableChunks.map((chunk, idx) => {
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`gacha:collab:${idx + 1}`) // dispatcherは parts[2] を見てないので何でもOK
+      .setPlaceholder(`コラボガチャを選択 (${idx + 1}/${totalMenus})`)
+      .addOptions(
+        chunk.map(entry => ({
+          label: entry.key,
+          value: entry.id
+        }))
+      );
 
-  return [baseRow, row1, row2];
+    return new ActionRowBuilder().addComponents(select);
+  });
+
+  return [baseRow, ...selectRows];
 }
+
 
 // 連数選択ボタン
 function buildRollCountButtons(gachaId) {

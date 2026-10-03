@@ -15,6 +15,7 @@ const DEFAULT = () => ({
   current: null,              // 再生中トラック
   loop: LOOP.off,             // off | track | queue
   playing: false,             // 再生フラグ
+  introActive: false,         // イントロクイズ進行中フラグ
   idleTimer: null,            // setTimeout のハンドル
   lastTextChannelId: null,    // 直近のスラッシュ実行テキストCH（将来拡張用）
   lastVcId: null,
@@ -38,6 +39,7 @@ export function resetState(gid) {
   s.queue = [];
   s.current = null;
   s.playing = false;
+  s.introActive = false;
   s.loop = LOOP.off;
   cancelIdle(gid);
   s.lastVcId = null;

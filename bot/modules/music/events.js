@@ -42,6 +42,7 @@ export function attachMusicEventWires(client) {
 
     player.on('end', async () => {
       const st = getState(gid);
+      if (st?.introActive) return;
       if (!st.conn || !guild || !isBotInVcNow(guild)) return;
       if ((st.selfLeaveUntil || 0) > Date.now()) return;
 
@@ -62,6 +63,7 @@ export function attachMusicEventWires(client) {
 
     player.on('stuck', () => {
       const st = getState(gid);
+      if (st?.introActive) return;
       st.playing = false;
       if (!st.conn || !guild || !isBotInVcNow(guild)) return;
       if ((st.selfLeaveUntil || 0) > Date.now()) return;
@@ -79,6 +81,7 @@ export function attachMusicEventWires(client) {
 
     player.on('exception', () => {
       const st = getState(gid);
+      if (st?.introActive) return;
       st.playing = false;
       if (!st.conn || !guild || !isBotInVcNow(guild)) return;
       if ((st.selfLeaveUntil || 0) > Date.now()) return;
@@ -97,6 +100,7 @@ export function attachMusicEventWires(client) {
     player.on('error', (e) => {
       console.error(`[PlayerError][${gid}]`, e);
       const st = getState(gid);
+      if (st?.introActive) return;
       st.playing = false;
       if (!st.conn || !guild || !isBotInVcNow(guild)) return;
       if ((st.selfLeaveUntil || 0) > Date.now()) return;

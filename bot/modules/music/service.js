@@ -4,6 +4,18 @@ import { LOOP, getState, resetState, cancelIdle, setIdle } from './state.js';
 import { ensureConnectionV4 } from './lavalink.js';
 import { toArray, buildIdentifier } from './utils.js';
 
+// --- 音楽通知用の共通Embed（タイトルなし・本文だけ） ---
+// description: 今まで content に渡していたメッセージ本文
+function buildMusicEmbed(description, title) {
+  const embed = {
+    description,
+    color: 0x7cc5ff,
+  };
+  if (title) embed.title = title; // タイトルはあってもなくてもOK
+  return embed;
+}
+
+
 // 環境値（glueから）
 const AUTO_LEAVE_MS = 3 * 60 * 1000;
 
@@ -15,14 +27,35 @@ async function isInSameVc(gid, vcId) {
   return !!(me?.voice?.channelId && me.voice.channelId === vcId);
 }
 
-// --- 内部ユーティリティ: 現在のVCにだけメッセージを出す（出せなければ黙る） ---
-async function sendToCurrentVc(gid, content) {
+// --- 現在のVCにだけメッセージを出す（送れなければ黙る・Embed版） ---
+async function sendToCurrentVc(gid, content, title) {
   const { client, sendToChannel } = useGlue();
-  const guild = client.guilds.cache.get(gid) ?? await client.guilds.fetch(gid).catch(() => null);
-  const me = guild?.members?.me ?? (guild ? await guild.members.fetchMe().catch(() => null) : null);
+  if (!client || !sendToChannel) return false;
+
+  const guild =
+    client.guilds.cache.get(gid) ??
+    (await client.guilds.fetch(gid).catch(() => null));
+  const me =
+    guild?.members?.me ??
+    (guild ? await guild.members.fetchMe().catch(() => null) : null);
+
   const vcId = me?.voice?.channelId || null;
   if (!vcId) return false;
-  return sendToChannel(gid, vcId, content);
+
+  const embed = buildMusicEmbed(content, title);
+  return sendToChannel(gid, vcId, { embeds: [embed] });
+}
+
+async function rejectIfIntroRunning(itx) {
+  const s = getState(itx.guildId);
+  if (!s?.introActive) return false;
+
+  return {
+    ephemeral: true,
+    embeds: [
+      buildMusicEmbed('いまイントロクイズ進行中だよ。終わってから使ってね(　◜ω◝　)')
+    ]
+  };
 }
 
 export async function resolveYouTube(identifierOrQuery) {
@@ -87,9 +120,13 @@ export async function playNext(gid) {
   s.playing = true;
   cancelIdle(gid);
 
-  // 再生開始通知は「VCに送れた時だけ」
+  // 再生開始通知は「VCに送れた時だけ」（Embed）
   const title = next.info?.title || '(unknown)';
-  await sendToCurrentVc(gid, `▶ 再生開始(・∀・): **${title}**`).catch(() => {});
+  await sendToCurrentVc(
+    gid,
+    `**${title}**`,
+    '▶ 再生開始(・∀・)'
+  ).catch(() => {});
 
   await s.conn.playTrack({ track: { encoded: next.encoded } });
 }
@@ -110,8 +147,11 @@ export function scheduleIdle(gid, reason = 'idle') {
       return;
     }
 
-    // 2) VCにだけ告知（送れなければ黙る）
-    await sendToCurrentVc(gid, '静かになったから落ちるね( ＾ω＾ )」 ﾏﾀﾅ').catch(() => {});
+    // 2) VCにだけ告知（送れなければ黙る・Embed）
+    await sendToCurrentVc(
+      gid,
+      '静かになったから落ちるね( ＾ω＾ )」 ﾏﾀﾅ'
+    ).catch(() => {});
     s.selfLeaveUntil = Date.now() + 10000;
     await leaveHardAndClear(gid);
     console.log(`[auto-leave] ${gid} (${reason}) after ${AUTO_LEAVE_MS}ms`);
@@ -137,12 +177,22 @@ export async function playCommand({ itx, q }) {
   const st = getState(gid);
   st.lastTextChannelId = itx.channelId;
 
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   // 1) VCを取得
   const vcId =
     itx.member?.voice?.channelId ||
     itx.guild?.voiceStates?.cache?.get(itx.user.id)?.channelId ||
     null;
-  if (!vcId) return { ephemeral: true, content: '先にボイスチャンネルに参加してちょ(´Д` )' };
+  if (!vcId) {
+    return {
+      ephemeral: true,
+      embeds: [
+        buildMusicEmbed('先にボイスチャンネルに参加してちょ(´Д` )')
+      ]
+    };
+  }
   st.lastVcId = vcId;
 
   // 2) 横取り禁止（同ギルド内の別VCに居るなら拒否：まだdeferしない）
@@ -152,7 +202,9 @@ export async function playCommand({ itx, q }) {
     if (currentVcId && currentVcId !== vcId) {
       return {
         ephemeral: true,
-        content: '今は他のVCで使用中かも…(/ᐛ\\\\)'
+        embeds: [
+          buildMusicEmbed('今は他のVCで使用中かも…(/ᐛ\\)')
+        ]
       };
     }
   } catch { /* 無視して従来処理へ */ }
@@ -168,14 +220,22 @@ export async function playCommand({ itx, q }) {
   const first = tracks[0];
   if (!first?.encoded) {
     // 未接続のまま終了
-    return { content: '見つからなかった…(´._.`)' };
+    return {
+      embeds: [
+        buildMusicEmbed('見つからなかった…(´._.`)')
+      ]
+    };
   }
 
   // 5) 上限チェック（まだ未接続なので入室せずに終了可能）
   const s = getState(gid);
   const room = Math.max(0, maxQueue - s.queue.length);
   if (!isPlaylist && room <= 0) {
-    return { content: `これ以上は入らないよ( ᐛ )（上限${maxQueue}）` };
+    return {
+      embeds: [
+        buildMusicEmbed(`これ以上は入らないよ( ᐛ )（上限${maxQueue}）`)
+      ]
+    };
   }
 
   // 6) ここで初めて接続（同じVCならスキップ）
@@ -185,7 +245,11 @@ export async function playCommand({ itx, q }) {
       await ensureConnectionV4(gid, vcId);
     } catch (e) {
       console.error('[ensureConnectionV4]', e?.message || e);
-      return { content: '接続に失敗しちゃった…もう一度試してみてね。( ; ; )' };
+      return {
+        embeds: [
+          buildMusicEmbed('接続に失敗しちゃった…もう一度試してみてね。( ; ; )')
+        ]
+      };
     }
   }
 
@@ -194,7 +258,11 @@ export async function playCommand({ itx, q }) {
     // 単発
     s.queue.push(first);
     if (!s.playing) await playNext(gid);
-    return { content: `プレイリストに追加(・∀・): **${first.info?.title || '(unknown)'}**` };
+    return {
+      embeds: [
+        buildMusicEmbed(`**${first.info?.title || '(unknown)'}**`,'プレイリストに追加(・∀・)')
+      ]
+    };
   } else {
     // プレイリスト：要件
     // - 未再生なら「先頭1曲を即再生」＆「残りをキュー投入」
@@ -221,24 +289,42 @@ export async function playCommand({ itx, q }) {
     }
     const more = tracks.length - added;
     if (added === 0) {
-      return { content: `プレイリスト追加できなかった…( ᐛ )（キュー上限${maxQueue}）` };
+      return {
+        embeds: [
+          buildMusicEmbed(`プレイリスト追加できなかった…( ᐛ )（キュー上限${maxQueue}）`)
+        ]
+      };
     }
     const tail = more > 0 ? `（${added}件追加・${more}件は上限で見送り）` : `（${added}件追加）`;
-    return { content: `プレイリストを追加(・∀・) ${tail}` };
+    return {
+      embeds: [
+        buildMusicEmbed(`プレイリストを追加(・∀・) ${tail}`)
+      ]
+    };
   }
 }
 
 export async function skipCommand({ itx }) {
   const gid = itx.guildId;
   getState(gid).lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   const s = getState(gid);
   const hasSomething = !!s.current || s.queue.length > 0 || s.playing;
   if (!hasSomething) {
-    return { ephemeral: true, content: '何も再生してないかも(||´Д｀)' };
+    return {
+      ephemeral: true,
+      embeds: [
+        buildMusicEmbed('何も再生してないかも(||´Д｀)')
+      ]
+    };
   }
+
   if (s.loop === LOOP.track) s.loop = LOOP.off;
   s.playing = false;
-  // Lavalink v4/ Shoukaku v4 は stop() が本命。互換のため両方叩く。
+
   try {
     if (typeof s.conn?.stop === 'function') {
       await s.conn.stop();
@@ -246,24 +332,55 @@ export async function skipCommand({ itx }) {
       await s.conn.stopTrack();
     }
   } catch {}
-  return { content: '⏭ スキップしたよん=͟͟͞͞ ( ˙꒳​˙)' };
+
+  await sendToCurrentVc(
+    gid,
+    '⏭ スキップしたよん=͟͟͞͞ ( ˙꒳​˙)',
+    'スキップ'
+  ).catch(() => {});
+
+  return {
+    embeds: [
+      buildMusicEmbed('⏭ スキップしたよん=͟͟͞͞ ( ˙꒳​˙)')
+    ]
+  };
 }
 
 export async function leaveCommand({ itx }) {
   const gid = itx.guildId;
   getState(gid).lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   const s = getState(gid);
+
+  await sendToCurrentVc(
+    gid,
+    'またいつでも呼んでね( ＾ω＾ )」 ﾏﾀﾅ',
+    '退出'
+  ).catch(() => {});
+
   // /leave ウィンドウ中はプレイヤー終端/空VC/idleの全通知を黙らせる
   s.selfLeaveUntil = Date.now() + 10000;
   cancelIdle(gid);
   await leaveHardAndClear(gid);
-  return { content: 'またいつでも呼んでね( ＾ω＾ )」 ﾏﾀﾅ' };
+
+  return {
+    embeds: [
+      buildMusicEmbed('またいつでも呼んでね( ＾ω＾ )」 ﾏﾀﾅ')
+    ]
+  };
 }
 
-export function queueCommand({ itx }) {
+export async function queueCommand({ itx }) {
   const { maxQueue } = useGlue();
   const gid = itx.guildId;
   getState(gid).lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   const s = getState(gid);
   const lines = [];
   if (s.current) lines.push(`**▶ 再生中:** ${s.current.info?.title || '(unknown)'} — ${s.current.info?.author || ''}`);
@@ -291,35 +408,258 @@ function loopLabel(loop) {
 }
 
 // === Loop commands ===
-export function loopCommand({ itx }) {
+export async function loopCommand({ itx, q, notify = true }) {
+  const { maxQueue } = useGlue();
   const gid = itx.guildId;
-  getState(gid).lastTextChannelId = itx.channelId;
+  const st = getState(gid);
+  st.lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
+  const query = typeof q === 'string' ? q.trim() : '';
   const s = getState(gid);
-  s.loop = s.loop === LOOP.track ? LOOP.off : LOOP.track;
-  return { content: `単曲ループ開始(・∀・): **${s.loop === LOOP.track ? 'ON' : 'OFF'}**` };
+
+  // =========================
+  // 引数なし：従来の単曲ループON/OFF
+  // =========================
+  if (!query) {
+    const hasPlayingTrack = !!s.current && !!s.playing;
+
+    if (!hasPlayingTrack) {
+      return {
+        ephemeral: true,
+        embeds: [
+          buildMusicEmbed('今は何も再生してないかも…|ω･`)')
+        ]
+      };
+    }
+
+    s.loop = s.loop === LOOP.track ? LOOP.off : LOOP.track;
+
+    const msg = `単曲ループ開始(・∀・): **${s.loop === LOOP.track ? 'ON' : 'OFF'}**`;
+
+    if (notify) {
+      await sendToCurrentVc(
+        gid,
+        msg,
+        'ループ設定'
+      ).catch(() => {});
+    }
+
+    return {
+      embeds: [
+        buildMusicEmbed(msg)
+      ]
+    };
+  }
+
+  // =========================
+  // 引数あり：曲追加 + 単曲ループON
+  // =========================
+
+  // 1) VCを取得
+  const vcId =
+    itx.member?.voice?.channelId ||
+    (itx.guild && itx.user?.id
+      ? itx.guild.voiceStates?.cache?.get(itx.user.id)?.channelId
+      : null) ||
+    itx.voiceChannelId ||
+    null;
+
+  if (!vcId) {
+    return {
+      ephemeral: true,
+      embeds: [
+        buildMusicEmbed('先にボイスチャンネルに参加してちょ(´Д` )')
+      ]
+    };
+  }
+
+  st.lastVcId = vcId;
+
+  // 2) 横取り禁止
+  try {
+    const me =
+      itx.guild?.members?.me ??
+      (itx.guild?.members
+        ? await itx.guild.members.fetchMe().catch(() => null)
+        : null);
+
+    const currentVcId = me?.voice?.channelId ?? null;
+    if (currentVcId && currentVcId !== vcId) {
+      return {
+        ephemeral: true,
+        embeds: [
+          buildMusicEmbed('今は他のVCで使用中かも…(/ᐛ\\)')
+        ]
+      };
+    }
+  } catch {
+    // 無視して従来処理へ
+  }
+
+  // 3) Slash実行時だけ遅延応答
+  if (typeof itx.deferReply === 'function' && !itx.deferred && !itx.replied) {
+    await itx.deferReply();
+  }
+
+  // 4) 解決（成功してから接続）
+  const resolved = await resolveYouTube(query);
+  const tracksRaw = Array.isArray(resolved?.tracks) ? resolved.tracks : [];
+  const tracks = tracksRaw.filter(t => t?.encoded);
+  const isPlaylist = !!resolved?.playlist;
+  const first = tracks[0];
+
+  if (!first?.encoded) {
+    return {
+      embeds: [
+        buildMusicEmbed('見つからなかった…(´._.`)')
+      ]
+    };
+  }
+
+  // 5) 上限チェック
+  const limit = maxQueue ?? 100;
+  const room = Math.max(0, limit - s.queue.length);
+
+  if (room <= 0) {
+    return {
+      embeds: [
+        buildMusicEmbed(`これ以上は入らないよ( ᐛ )（上限${limit}）`)
+      ]
+    };
+  }
+
+  // 6) 接続
+  const alreadyIn = await isInSameVc(gid, vcId);
+  if (!alreadyIn) {
+    try {
+      await ensureConnectionV4(gid, vcId);
+    } catch (e) {
+      console.error('[ensureConnectionV4]', e?.message || e);
+      return {
+        embeds: [
+          buildMusicEmbed('接続に失敗しちゃった…もう一度試してみてね。( ; ; )')
+        ]
+      };
+    }
+  }
+
+  // 7) キュー投入 → 単曲ループON → 必要なら再生開始
+  const wasPlaying = !!s.playing;
+  let msg;
+
+  if (!isPlaylist) {
+    s.queue.push(first);
+
+    // 追加してから単曲ループON
+    s.loop = LOOP.track;
+
+    if (!s.playing) {
+      await playNext(gid);
+    }
+
+    const title = first.info?.title || '(unknown)';
+    msg = wasPlaying
+      ? `**${title}** をプレイリストに追加したよ。\n現在の曲を単曲ループONにしたよ(・∀・)`
+      : `**${title}** を単曲ループONで再生するよ(・∀・)`;
+  } else {
+    const toAdd = tracks.slice(0, room);
+    s.queue.push(...toAdd);
+
+    // 追加してから単曲ループON
+    s.loop = LOOP.track;
+
+    if (!s.playing) {
+      await playNext(gid);
+    }
+
+    const added = toAdd.length;
+    const more = tracks.length - added;
+    const tail = more > 0
+      ? `（${added}件追加・${more}件は上限で見送り）`
+      : `（${added}件追加）`;
+
+    msg = wasPlaying
+      ? `プレイリストを追加(・∀・) ${tail}\n現在の曲を単曲ループONにしたよ`
+      : `プレイリストを追加(・∀・) ${tail}\n先頭曲を単曲ループONで再生するよ`;
+  }
+
+  if (notify) {
+    await sendToCurrentVc(
+      gid,
+      msg,
+      'ループ設定'
+    ).catch(() => {});
+  }
+
+  return {
+    embeds: [
+      buildMusicEmbed(msg)
+    ]
+  };
 }
 
-export function loopQueueCommand({ itx }) {
+export async function loopQueueCommand({ itx }) {
   const gid = itx.guildId;
   getState(gid).lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   const s = getState(gid);
   s.loop = s.loop === LOOP.queue ? LOOP.off : LOOP.queue;
-  return { content: `全体ループ開始(・∀・): **${s.loop === LOOP.queue ? 'ON' : 'OFF'}**` };
+
+  const msg = `全体ループ開始(・∀・): **${s.loop === LOOP.queue ? 'ON' : 'OFF'}**`;
+
+  await sendToCurrentVc(
+    gid,
+    msg,
+    'ループ設定'
+  ).catch(() => {});
+
+  return {
+    embeds: [
+      buildMusicEmbed(msg)
+    ]
+  };
 }
 
-export function shuffleCommand({ itx }) {
+export async function shuffleCommand({ itx }) {
   const gid = itx.guildId;
   getState(gid).lastTextChannelId = itx.channelId;
+
+  const introBlocked = await rejectIfIntroRunning(itx);
+  if (introBlocked) return introBlocked;
+
   const s = getState(gid);
 
   if (!s.queue?.length) {
-    return { ephemeral: true, content: 'シャッフルする曲がないかも…|ω･`)' };
+    return {
+      ephemeral: true,
+      embeds: [
+        buildMusicEmbed('シャッフルする曲がないかも…|ω･`)')
+      ]
+    };
   }
 
-  // Fisher–Yates shuffle（キューだけ・再生中はそのまま）
   for (let i = s.queue.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [s.queue[i], s.queue[j]] = [s.queue[j], s.queue[i]];
   }
-  return { content: `プレイリストをシャッフルしたよ( ◜ω◝و)و（${s.queue.length}件）` };
+
+  const msg = `プレイリストをシャッフルしたよ( ◜ω◝و)و（${s.queue.length}件）`;
+
+  await sendToCurrentVc(
+    gid,
+    msg,
+    'シャッフル'
+  ).catch(() => {});
+
+  return {
+    embeds: [
+      buildMusicEmbed(msg)
+    ]
+  };
 }

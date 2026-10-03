@@ -8,6 +8,9 @@ import { installMusicGlue, useGlue } from './glue.js';
 import { buildMusicSlashBuilders, handleInteraction } from './commands.js';
 import { attachMusicEventWires } from './events.js';
 
+export { rpcPlay, rpcSkip, rpcLeave, rpcQueue, getRpcStatus, rpcLoop, rpcLoopQueue, rpcShuffle } from './rpc.js';
+
+
 let _wiredClientId = null; // 配線済みの Client を記録（多重 wire を抑止）
 
 export function installMusicModule(deps = {}) {

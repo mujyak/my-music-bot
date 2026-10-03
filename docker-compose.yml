@@ -1,6 +1,6 @@
 services:
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4
+    image: ghcr.io/lavalink-devs/lavalink:4.2.1
     container_name: lavalink
     restart: unless-stopped
     environment:
@@ -9,18 +9,60 @@ services:
     volumes:
       - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
 
-  bot:
+  bot_totoro:
     build: ./bot
-    container_name: music-bot
+    container_name: music-bot-totoro
     restart: unless-stopped
     env_file: .env
+    environment:
+      - BOT_PROFILE=totoro
+      # 代打有効ギルド
+      - DELEGATION_GUILDS=${DELEGATION_GUILDS}
+      # 中/小のRPC先
+      - NAKATORO_RPC_URL=${NAKATORO_RPC_URL}
+      - NAKATORO_RPC_TOKEN=${NAKATORO_RPC_TOKEN}
+      - KOTOTORO_RPC_URL=${KOTOTORO_RPC_URL}
+      - KOTOTORO_RPC_TOKEN=${KOTOTORO_RPC_TOKEN}
     working_dir: /usr/src/app
     volumes:
       - ./bot:/usr/src/app:delegated
-      - node_modules:/usr/src/app/node_modules   # ← 匿名ではなく“名前付き”に固定！
+      - node_modules_totoro:/usr/src/app/node_modules
     depends_on:
       - lavalink
 
-# ここを必ず追加
+  bot_nakatoro:
+    build: ./bot
+    container_name: music-bot-nakatoro
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - BOT_PROFILE=nakatoro
+      - WORKER_RPC_PORT=${WORKER_RPC_PORT}
+      - WORKER_RPC_TOKEN=${NAKATORO_RPC_TOKEN}
+    working_dir: /usr/src/app
+    volumes:
+      - ./bot:/usr/src/app:delegated
+      - node_modules_nakatoro:/usr/src/app/node_modules
+    depends_on:
+      - lavalink
+
+  bot_kototoro:
+    build: ./bot
+    container_name: music-bot-kototoro
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - BOT_PROFILE=kototoro
+      - WORKER_RPC_PORT=${WORKER_RPC_PORT}
+      - WORKER_RPC_TOKEN=${KOTOTORO_RPC_TOKEN}
+    working_dir: /usr/src/app
+    volumes:
+      - ./bot:/usr/src/app:delegated
+      - node_modules_kototoro:/usr/src/app/node_modules
+    depends_on:
+      - lavalink
+
 volumes:
-  node_modules:
+  node_modules_totoro:
+  node_modules_nakatoro:
+  node_modules_kototoro:

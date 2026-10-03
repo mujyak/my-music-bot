@@ -6,6 +6,51 @@ import path from "node:path";
 // data/roles/messages.json に保存する
 const STORE_FILE = path.resolve(process.cwd(), "data", "roles", "messages.json");
 
+const PROFILE_PREFIX = {
+  totoro: "TOTORO_",
+  nakatoro: "NAKATORO_",
+  kototoro: "KOTORO_",
+};
+
+const ALL_PREFIXES = ["TOTORO_", "NAKATORO_", "KOTORO_"];
+
+// 環境変数を柔軟に解決する
+function resolveEnv(baseName) {
+  if (process.env[baseName]) {
+    return {
+      value: process.env[baseName],
+      source: baseName,
+    };
+  }
+
+  const profile = String(process.env.BOT_PROFILE || "").trim().toLowerCase();
+  const prefix = PROFILE_PREFIX[profile];
+  if (prefix) {
+    const profiled = process.env[`${prefix}${baseName}`];
+    if (profiled) {
+      return {
+        value: profiled,
+        source: `${prefix}${baseName}`,
+      };
+    }
+  }
+
+  for (const p of ALL_PREFIXES) {
+    const v = process.env[`${p}${baseName}`];
+    if (v) {
+      return {
+        value: v,
+        source: `${p}${baseName}`,
+      };
+    }
+  }
+
+  return {
+    value: undefined,
+    source: undefined,
+  };
+}
+
 // 設定ファイルの読み込み
 function loadConfig(configPath) {
   const abs = path.resolve(process.cwd(), configPath);
@@ -50,9 +95,12 @@ function normalizeEmojiString(str) {
 
 // メイン処理
 async function main() {
-  const token = process.env.DISCORD_TOKEN;
+  const tokenInfo = resolveEnv("DISCORD_TOKEN");
+  const token = tokenInfo.value;
+
   if (!token) {
-    console.error("DISCORD_TOKEN が環境変数に設定されていません。");
+    console.error("DISCORD_TOKEN 系の環境変数が見つかりません。");
+    console.error("確認候補: DISCORD_TOKEN / TOTORO_DISCORD_TOKEN / NAKATORO_DISCORD_TOKEN / KOTORO_DISCORD_TOKEN");
     process.exit(1);
   }
 
@@ -64,6 +112,11 @@ async function main() {
 
   const config = loadConfig(configPath);
   const rest = new REST({ version: "10" }).setToken(token);
+
+  console.log(
+    `using token source: ${tokenInfo.source}` +
+    (process.env.BOT_PROFILE ? ` (BOT_PROFILE=${process.env.BOT_PROFILE})` : "")
+  );
 
   // チャンネル情報を取得して guildId を知る
   const channel = await rest.get(Routes.channel(channelId));
@@ -87,7 +140,6 @@ async function main() {
     const key = normalizeEmojiString(rawEmoji);
 
     let emojiForApi = rawEmoji;
-    // カスタム絵文字は "<:name:id>" → "name:id" にして URL エンコード
     const m = rawEmoji.match(/^<a?:([^:>]+):(\d+)>$/);
     if (m) {
       const name = m[1];
@@ -114,6 +166,7 @@ async function main() {
     guildId,
     channelId,
     messageId: message.id,
+    initState: "pending",
     entries: config.entries.map(e => ({
       emojiKey: normalizeEmojiString(e.emoji),
       roleId: e.roleId
@@ -122,6 +175,7 @@ async function main() {
   saveStore(store);
 
   console.log("settings saved to:", STORE_FILE);
+  console.log("initState=pending で登録しました。bot 側が初回 catch-up 後に ready へ更新します。");
 }
 
 // 実行
@@ -129,17 +183,3 @@ main().catch(err => {
   console.error("failed:", err);
   process.exit(1);
 });
-
-/*
-使い方（VPS 内）:
-
-cd /home/ubuntu/my-music-bot
-
-# 事前に data/roles/sample-config.json を編集しておく
-sudo docker compose exec bot node scripts/post-roles-message.js <channelId> data/roles/sample-config.json
-
-成功すると:
-- 指定チャンネルにトトロbotがメッセージを投稿
-- そのメッセージに指定した絵文字がまとめてリアクションとして付く
-- data/roles/messages.json に「messageId と emoji→roleId の対応」が追記される
-*/

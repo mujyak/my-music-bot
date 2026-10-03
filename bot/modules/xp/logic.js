@@ -9,7 +9,7 @@ export const SEGMENTS = [
 ];
 
 // 追加msを“どの帯域で消費するか”に分割してポイントを算出。
-// speakingMultiplier は 1 or 2（ミュート解除なら2）
+// speakingMultiplier は 1 or 3（ミュート解除なら3）
 export function computeAwardPoints(priorSessionMs, addedMs, speakingMultiplier = 1) {
   let remain = Math.max(0, addedMs);
   let cursor = Math.max(0, priorSessionMs);
